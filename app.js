@@ -1,137 +1,172 @@
+import { loadShader } from './shaders/loadShader.js'; // helper function to fetch GLSL
+
 const canvas = document.getElementById('glcanvas');
 const gl = canvas.getContext('webgl2');
 canvas.width = innerWidth;
 canvas.height = innerHeight;
 
-if (!gl) {
-  alert("WebGL2 not supported");
+if (!gl) alert('WebGL2 not supported');
+
+let currentMode = 'realistic'; // 'realistic' or 'debug'
+const modeText = document.getElementById('modeText');
+document.getElementById('realisticBtn').onclick = () => { currentMode = 'realistic'; modeText.textContent = 'Realistic'; };
+document.getElementById('debugBtn').onclick = () => { currentMode = 'debug'; modeText.textContent = 'Debug'; };
+
+// --- Canvas resize ---
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Mouse / touch for heat / updraft ---
+let mouse = [canvas.width/2, canvas.height/2];
+let heat = 0.0;
+
+canvas.addEventListener('mousemove', e => { 
+    mouse = [e.clientX, canvas.height - e.clientY]; 
+    heat = 1.0;
+});
+canvas.addEventListener('touchmove', e => { 
+    const t = e.touches[0];
+    mouse = [t.clientX, canvas.height - t.clientY]; 
+    heat = 1.0;
+});
+canvas.addEventListener('mouseleave', ()=> heat = 0.0);
+
+// --- Shader programs ---
+const shaders = {
+    vertex: await loadShader('./shaders/vertex.glsl'),
+    advection: await loadShader('./shaders/advection.frag'),
+    divergence: await loadShader('./shaders/divergence.frag'),
+    pressure: await loadShader('./shaders/pressure.frag'),
+    gradientSubtract: await loadShader('./shaders/gradientSubtract.frag'),
+    temperature: await loadShader('./shaders/temperature.frag'),
+    humidity: await loadShader('./shaders/humidity.frag'),
+    charge: await loadShader('./shaders/charge.frag'),
+    renderRealistic: await loadShader('./shaders/renderRealistic.frag'),
+    renderDebug: await loadShader('./shaders/renderDebug.frag')
+};
+
+// --- Helper: compile shader ---
+function compileShader(type, source){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, source);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        console.error(gl.getShaderInfoLog(s));
+    return s;
 }
 
-// === Helper functions ===
-function compileShader(type, source) {
-  const shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    console.error(gl.getShaderInfoLog(shader));
-  }
-  return shader;
+function createProgram(vsSource, fsSource){
+    const prog = gl.createProgram();
+    const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+    const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS))
+        console.error(gl.getProgramInfoLog(prog));
+    return prog;
 }
 
-function createProgram(vsSource, fsSource) {
-  const program = gl.createProgram();
-  const vs = compileShader(gl.VERTEX_SHADER, vsSource);
-  const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.error(gl.getProgramInfoLog(program));
-  }
-  return program;
-}
-
-// === Shaders ===
-const vertexShader = `#version 300 es
-in vec2 a_position;
-void main() {
-  gl_Position = vec4(a_position, 0.0, 1.0);
-}
-`;
-
-const fragmentShader = `#version 300 es
-precision highp float;
-out vec4 outColor;
-
-uniform float u_time;
-uniform vec2 u_resolution;
-uniform vec2 u_mouse;
-
-// Noise function for terrain/water/clouds
-float rand(vec2 p){return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453);}
-float noise(vec2 p){
-  vec2 i=floor(p);vec2 f=fract(p);
-  float a=rand(i);
-  float b=rand(i+vec2(1.,0.));
-  float c=rand(i+vec2(0.,1.));
-  float d=rand(i+vec2(1.,1.));
-  vec2 u=f*f*(3.-2.*f);
-  return mix(a,b,u.x)+(c-a)*u.y*(1.-u.x)+(d-b)*u.x*u.y;
-}
-
-void main() {
-  vec2 uv = gl_FragCoord.xy / u_resolution;
-  vec2 p = uv * 6.0;
-  
-  // Terrain line
-  float terrain = noise(vec2(p.x, 0.0)) * 0.2 + 0.4;
-
-  vec3 col;
-  if (uv.y < terrain) {
-    // Land
-    col = mix(vec3(0.1,0.5,0.1), vec3(0.4,0.25,0.1), uv.y*3.0);
-  } else if (uv.y < terrain + 0.05) {
-    // Water surface shimmer
-    float wave = sin(p.x*5.0 + u_time*3.0)*0.02;
-    col = mix(vec3(0.0,0.3,0.5), vec3(0.1,0.5,0.8), uv.y + wave);
-  } else {
-    // Sky with clouds
-    float clouds = noise(vec2(p.x*1.5, p.y*1.5 + u_time*0.1));
-    float sky = smoothstep(0.4, 1.0, uv.y);
-    col = mix(vec3(0.5,0.7,0.9), vec3(1.0), smoothstep(0.5,0.8,clouds));
-  }
-
-  // Lightning flashes
-  float lightning = step(0.995, rand(vec2(u_time, uv.x))) * smoothstep(0.0, 0.5, uv.y);
-  if (lightning > 0.0) {
-    col += vec3(1.0,1.0,1.0)*lightning;
-  }
-
-  // Mouse-controlled warm air effect (updraft)
-  float dist = distance(uv, u_mouse / u_resolution);
-  col += vec3(0.4,0.2,0.1)*(0.2 / (dist*20.0+0.01));
-
-  outColor = vec4(col, 1.0);
-}
-`;
-
-// === Setup ===
-const program = createProgram(vertexShader, fragmentShader);
-const pos = gl.getAttribLocation(program, 'a_position');
-const buffer = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+// --- Full-screen quad ---
+const quadBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-  -1, -1, 1, -1, -1, 1,
-  -1, 1, 1, -1, 1, 1,
+    -1,-1, 1,-1, -1,1,
+    -1,1, 1,-1, 1,1
 ]), gl.STATIC_DRAW);
 
-gl.useProgram(program);
-gl.enableVertexAttribArray(pos);
-gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+// --- Framebuffers / textures setup ---
+// Note: for each field (velocity, temperature, humidity, charge, pressure)
+// we create a double FBO (ping-pong) for simulation passes
+const simWidth = 256;
+const simHeight = 256;
 
-const timeLoc = gl.getUniformLocation(program, 'u_time');
-const resLoc = gl.getUniformLocation(program, 'u_resolution');
-const mouseLoc = gl.getUniformLocation(program, 'u_mouse');
+function createDoubleFBO(w, h){
+    const texA = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texA);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const fboA = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboA);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
 
-let mouse = [0, 0];
-canvas.addEventListener('mousemove', e => {
-  mouse = [e.clientX, canvas.height - e.clientY];
-});
-canvas.addEventListener('touchmove', e => {
-  const t = e.touches[0];
-  mouse = [t.clientX, canvas.height - t.clientY];
-});
+    const texB = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texB);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const fboB = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texB, 0);
 
-let start = performance.now();
-
-function render() {
-  const t = (performance.now() - start) / 1000;
-  gl.uniform1f(timeLoc, t);
-  gl.uniform2f(resLoc, canvas.width, canvas.height);
-  gl.uniform2f(mouseLoc, mouse[0], mouse[1]);
-
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
-  requestAnimationFrame(render);
+    return {read: {tex: texA, fbo: fboA}, write: {tex: texB, fbo: fboB}, swap(){ const t=this.read; this.read=this.write; this.write=t; }};
 }
 
-render();
+// --- Simulation FBOs ---
+const velocity = createDoubleFBO(simWidth, simHeight);
+const temperature = createDoubleFBO(simWidth, simHeight);
+const humidity = createDoubleFBO(simWidth, simHeight);
+const charge = createDoubleFBO(simWidth, simHeight);
+const pressure = createDoubleFBO(simWidth, simHeight);
+
+// --- Load programs ---
+const programs = {
+    advection: createProgram(shaders.vertex, shaders.advection),
+    divergence: createProgram(shaders.vertex, shaders.divergence),
+    pressure: createProgram(shaders.vertex, shaders.pressure),
+    gradientSubtract: createProgram(shaders.vertex, shaders.gradientSubtract),
+    temperature: createProgram(shaders.vertex, shaders.temperature),
+    humidity: createProgram(shaders.vertex, shaders.humidity),
+    charge: createProgram(shaders.vertex, shaders.charge),
+    renderRealistic: createProgram(shaders.vertex, shaders.renderRealistic),
+    renderDebug: createProgram(shaders.vertex, shaders.renderDebug)
+};
+
+// --- Utility: draw full-screen quad with program ---
+function drawQuad(prog, uniforms={}){
+    gl.useProgram(prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    const pos = gl.getAttribLocation(prog, 'a_position');
+    gl.enableVertexAttribArray(pos);
+    gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
+    for(const name in uniforms){
+        const loc = gl.getUniformLocation(prog,name);
+        const val = uniforms[name];
+        if(val.length===2) gl.uniform2fv(loc,val);
+        else if(val.length===3) gl.uniform3fv(loc,val);
+        else gl.uniform1f(loc,val);
+    }
+    gl.drawArrays(gl.TRIANGLES,0,6);
+}
+
+// --- Simulation loop ---
+let start = performance.now();
+function frame(){
+    const t = (performance.now()-start)/1000;
+
+    // --- Example: heat source applied to temperature ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, temperature.write.fbo);
+    drawQuad(programs.temperature, {u_time: t, u_heat: heat, u_mouse: mouse, u_resolution: [simWidth,simHeight]});
+    temperature.swap();
+
+    // --- Advect velocity, temperature, humidity, charge (simplified here) ---
+    // TODO: Add full advection, divergence, pressure solver, gradient subtraction passes
+
+    // --- Render final ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if(currentMode==='realistic'){
+        drawQuad(programs.renderRealistic, {u_time:t,u_resolution:[canvas.width,canvas.height],u_mouse:mouse});
+    }else{
+        drawQuad(programs.renderDebug, {u_time:t,u_resolution:[canvas.width,canvas.height],u_mouse:mouse});
+    }
+
+    requestAnimationFrame(frame);
+    heat*=0.98;
+}
+frame();
