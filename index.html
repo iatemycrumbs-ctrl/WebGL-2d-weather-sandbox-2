@@ -2,12 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>WebGL 2D Weather Sandbox</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>2D Weather Sandbox 2</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <canvas id="glcanvas"></canvas>
-  <script src="app.js"></script>
+
+  <div id="ui">
+    <button id="realisticBtn">Realistic Mode</button>
+    <button id="debugBtn">Debug Mode</button>
+    <p class="info">
+      Click / drag = Heat source (updraft) 🌡️<br>
+      Mode: <span id="modeText">Realistic</span>
+    </p>
+  </div>
+
+  <script type="module" src="app.js"></script>
 </body>
 </html>
